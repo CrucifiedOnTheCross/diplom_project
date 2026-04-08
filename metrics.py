@@ -18,22 +18,46 @@ CLASS_NAMES = ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc']
 # Индексы злокачественных новообразований: akiec, bcc, mel
 MALIGNANT_IDX = [0, 1, 4]
 
+import csv
+
 class HistoryTracker:
-    """Класс для хранения и обновления истории метрик в процессе обучения."""
-    def __init__(self):
+    """
+    Класс для хранения истории метрик и сохранения их на диск 'на лету' (Streaming).
+    Защищает от потери данных при падении скрипта.
+    """
+    def __init__(self, exp_dir=None):
         self.history = {
             'train_loss': [], 'val_loss': [], 
             'train_acc': [], 'val_acc': [], 
             'train_bacc': [], 'val_bacc': []
         }
+        self.csv_path = exp_dir / 'training_history.csv' if exp_dir else None
+        
+        # Создаем файл и пишем заголовки, если передан путь
+        if self.csv_path:
+            with open(self.csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(['Epoch', 'Train_Loss', 'Val_Loss', 'Train_Acc', 'Val_Acc', 'Train_BAcc', 'Val_BAcc'])
 
-    def update(self, train_loss, val_loss, train_acc, val_acc, train_bacc, val_bacc):
+    def update(self, epoch, train_loss, val_loss, train_acc, val_acc, train_bacc, val_bacc):
+        # 1. Обновляем оперативную память (для графиков)
         self.history['train_loss'].append(train_loss)
         self.history['val_loss'].append(val_loss)
         self.history['train_acc'].append(train_acc)
         self.history['val_acc'].append(val_acc)
         self.history['train_bacc'].append(train_bacc)
         self.history['val_bacc'].append(val_bacc)
+        
+        # 2. Дописываем строку в CSV на диск (Streaming)
+        if self.csv_path:
+            with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow([
+                    epoch, 
+                    f"{train_loss:.4f}", f"{val_loss:.4f}", 
+                    f"{train_acc:.4f}", f"{val_acc:.4f}", 
+                    f"{train_bacc:.4f}", f"{val_bacc:.4f}"
+                ])
 
 class EarlyStopping:
     """Класс для остановки обучения при стагнации целевой метрики."""

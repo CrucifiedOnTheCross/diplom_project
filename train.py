@@ -1,293 +1,224 @@
 import os
+import argparse
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torchvision import transforms
-from torchvision.transforms import v2  # Используем v2 для MixUp и CutMix
+from pathlib import Path
 from tqdm import tqdm
 import numpy as np
-from pathlib import Path
-import argparse
-from datetime import datetime
-from sklearn.metrics import accuracy_score, balanced_accuracy_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, matthews_corrcoef
 
-# Импорты ваших кастомных модулей
-from model import SkinLesionClassifier
+# Импорты из твоей кодовой базы
+from model import JointSkinLesionClassifier
+from ram_dataset import HAMRAMDataset 
 from losses import get_loss_function
-from metrics import (
-    HistoryTracker, calculate_advanced_metrics, 
-    plot_training_results, EarlyStopping, save_medical_report
-)
-from ram_dataset import RAMFullDataset
-
-# ==========================================
-# ЭКСТРЕМАЛЬНЫЕ ОПТИМИЗАЦИИ (RTX 5080)
-# ==========================================
-torch.backends.cudnn.benchmark = True 
-torch.backends.cuda.matmul.allow_tf32 = True 
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision('high')
+from metrics import HistoryTracker, EarlyStopping, calculate_advanced_metrics, save_medical_report, plot_training_results
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="HAM10000 - Ультимативный тренировочный пайплайн")
-    # Базовые настройки
-    parser.add_argument('--name', type=str, required=True, help="Имя эксперимента")
-    parser.add_argument('--data_dir', type=str, default='dataset', help="Папка с данными")
-    parser.add_argument('--out_dir', type=str, default='diploma_results', help="Главная папка для сохранения результатов")
+    parser = argparse.ArgumentParser(description="Ablation Study: Обучение моделей HAM10000")
+    parser.add_argument('--exp_name', type=str, required=True, help="Имя эксперимента")
+    parser.add_argument('--data_dir', type=str, default='dataset_preprocessed', help="Путь к данным")
+    parser.add_argument('--out_dir', type=str, default='science_folder', help="Папка для результатов")
+    parser.add_argument('--epochs', type=int, default=50, help="Кол-во эпох")
     
-    # Гиперпараметры обучения
-    parser.add_argument('--batch_size', type=int, default=512, help="Размер батча")
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--warmup', type=int, default=3, help="Эпохи прогрева головы")
-    parser.add_argument('--lr_head', type=float, default=3e-3, help="LR для головы")
-    parser.add_argument('--lr_backbone', type=float, default=5e-4, help="Max LR для бэкбона")
+    # Настройки батча и оптимизации памяти
+    parser.add_argument('--batch_size', type=int, default=8, help="Физический батч (рекомендуется 8-16)")
+    parser.add_argument('--accumulation_steps', type=int, default=4, help="Шаги аккумуляции (8*4=32)")
+    parser.add_argument('--lr', type=float, default=1e-4, help="Скорость обучения")
     
-    # Методы борьбы с дисбалансом
-    parser.add_argument('--loss', type=str, choices=['ce', 'focal'], default='ce')
+    # Конфигурация лоссов и балансировки
+    parser.add_argument('--loss', type=str, choices=['ce', 'focal'], default='ce', help="Функция потерь")
     parser.add_argument('--gamma', type=float, default=2.0, help="Gamma для Focal Loss")
-    parser.add_argument('--sampler', action='store_true', help="Включить Oversampling (WeightedRandomSampler)")
+    parser.add_argument('--smoothing', type=float, default=0.0, help="Label Smoothing")
+    parser.add_argument('--use_weights', action='store_true', help="Включить веса классов")
+    parser.add_argument('--sampling_mode', type=str, choices=['none', 'oversample', 'undersample'], default='none')
     
-    # Продвинутые аугментации и регуляризация
-    parser.add_argument('--augment', action='store_true', help="Включить базовую GPU-аугментацию (геометрия)")
-    parser.add_argument('--smoothing', type=float, default=0.0, help="Label Smoothing (например, 0.1)")
-    parser.add_argument('--mixup', action='store_true', help="Включить MixUp аугментацию")
-    parser.add_argument('--cutmix', action='store_true', help="Включить CutMix аугментацию")
+    # Контрастивное обучение
+    parser.add_argument('--use_supcon', action='store_true', help="Включить SupCon")
+    parser.add_argument('--supcon_weight', type=float, default=0.1, help="Вес SupCon лосса")
     
     return parser.parse_args()
 
-def train_model():
+def get_sampler_and_weights(dataset, mode='oversample'):
+    labels = dataset.labels.numpy()
+    class_counts = np.bincount(labels)
+    num_classes = len(class_counts)
+    total_samples = len(labels)
+    
+    class_weights = 1.0 / (class_counts + 1e-8)
+    class_weights = class_weights * total_samples / num_classes
+    sample_weights = class_weights[labels]
+    
+    if mode == 'oversample':
+        target_num_samples = int(np.max(class_counts) * num_classes)
+    elif mode == 'undersample':
+        target_num_samples = int(np.min(class_counts) * num_classes)
+    else:
+        target_num_samples = total_samples
+
+    sampler = WeightedRandomSampler(weights=sample_weights, num_samples=target_num_samples, replacement=True)
+    return sampler, class_weights
+
+def main():
     args = parse_args()
-    device = torch.device("cuda")
     
-    # Создание директории эксперимента
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    exp_dir = Path(args.out_dir) / f"{timestamp}_{args.name}"
+    # --- ГЛОБАЛЬНЫЕ ОПТИМИЗАЦИИ ---
+    torch.backends.cudnn.benchmark = True 
+    torch.set_float32_matmul_precision('high')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    exp_dir = Path(args.out_dir) / args.exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
-    with open(exp_dir / "config.txt", "w") as f: f.write(str(args))
-
-    print(f"\n[START] {args.name} | Данные: {args.data_dir} | Выход: {exp_dir}")
     
-    # ==========================================
-    # 1. ЗАГРУЗКА ДАННЫХ
-    # ==========================================
-    dataset_path = Path(args.data_dir)
-    train_dataset = RAMFullDataset(dataset_path / 'train')
-    val_dataset = RAMFullDataset(dataset_path / 'valid')
+    # Логируем конфиг в файл
+    with open(exp_dir / 'config.txt', 'w') as f:
+        for k, v in vars(args).items():
+            f.write(f"{k}: {v}\n")
 
-    loader_kwargs = {
-        'batch_size': args.batch_size,
-        'pin_memory': True,
-        'num_workers': 8,
-        'persistent_workers': True,
-        'prefetch_factor': 2
-    }
+    print(f"\n[*] Эксперимент: {args.exp_name}")
+    print(f"[*] Эффективный батч: {args.batch_size * args.accumulation_steps}")
 
-    if args.sampler:
-        print("\n[*] ВНИМАНИЕ: Включен Сэмплер (WeightedRandomSampler)!")
-        class_counts = torch.bincount(train_dataset.labels)
-        class_weights = 1.0 / class_counts.float()
-        sample_weights = class_weights[train_dataset.labels].cpu()
-        
-        sampler = WeightedRandomSampler(
-            weights=sample_weights, 
-            num_samples=len(sample_weights), 
-            replacement=True
-        )
-        train_loader = DataLoader(train_dataset, sampler=sampler, **loader_kwargs)
-    else:
-        print("\n[*] Используется стандартное перемешивание (shuffle=True).")
-        train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-
-    val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
-
-    # ==========================================
-    # 2. ИНИЦИАЛИЗАЦИЯ ФУНКЦИИ ПОТЕРЬ
-    # ==========================================
-    num_classes = len(train_dataset.classes)
-    class_counts = torch.bincount(train_dataset.labels)
-    total_samples = len(train_dataset.labels)
+    # --- ПОДГОТОВКА ДАННЫХ (RAM + Многопоточность) ---
+    train_views = 2 if args.use_supcon else 1
+    train_dataset = HAMRAMDataset(Path(args.data_dir) / 'train', mode='train', n_views=train_views)
+    val_dataset = HAMRAMDataset(Path(args.data_dir) / 'valid', mode='valid', n_views=1)
     
-    dynamic_weights = total_samples / (num_classes * class_counts.float())
-    print("\n[*] Динамические веса Alpha (вычислены по тренировочной выборке):")
-    for cls_name, weight in zip(train_dataset.classes, dynamic_weights):
-        print(f"    - {cls_name}: {weight:.4f}")
+    sampler, class_weights = None, None
+    if args.sampling_mode != 'none' or args.use_weights:
+        func_mode = args.sampling_mode if args.sampling_mode != 'none' else 'oversample'
+        _sampler, _class_weights = get_sampler_and_weights(train_dataset, mode=func_mode)
+        sampler = _sampler if args.sampling_mode != 'none' else None
+        class_weights = _class_weights if args.use_weights else None
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=(sampler is None),
+        sampler=sampler, num_workers=8, pin_memory=True, 
+        persistent_workers=True, prefetch_factor=2
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False, 
+        num_workers=4, pin_memory=True, persistent_workers=True
+    )
+
+    # --- МОДЕЛЬ (С каналами-последними и JIT-компиляцией) ---
+    model = JointSkinLesionClassifier(num_classes=len(train_dataset.classes)).to(device, memory_format=torch.channels_last)
     
-    if args.loss == 'ce' and args.smoothing > 0:
-        print(f"[*] Используется CrossEntropyLoss с Label Smoothing = {args.smoothing}")
-        criterion = nn.CrossEntropyLoss(label_smoothing=args.smoothing).to(device)
-    else:
-        criterion = get_loss_function(
-            name=args.loss, 
-            gamma=args.gamma, 
-            class_weights=dynamic_weights if args.loss == 'focal' else None, 
-            device=device
-        )
-
-    # ==========================================
-    # 3. НАСТРОЙКА АУГМЕНТАЦИЙ (GPU)
-    # ==========================================
-    # Базовая геометрия
-    gpu_augment = nn.Sequential(
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1))
-    ).to(device)
-
-    # Продвинутая регуляризация (MixUp / CutMix)
-    mixup_cutmix_transforms = []
-    if args.mixup:
-        mixup_cutmix_transforms.append(v2.MixUp(num_classes=num_classes, alpha=0.2))
-    if args.cutmix:
-        mixup_cutmix_transforms.append(v2.CutMix(num_classes=num_classes, alpha=1.0))
-        
-    batch_collator = v2.RandomChoice(mixup_cutmix_transforms) if mixup_cutmix_transforms else None
-    if batch_collator:
-        print(f"[*] Включены батч-аугментации: MixUp={args.mixup}, CutMix={args.cutmix}")
-
-    # ==========================================
-    # 4. ИНИЦИАЛИЗАЦИЯ МОДЕЛИ
-    # ==========================================
-    model = SkinLesionClassifier(num_classes=num_classes).to(device)
-    if hasattr(torch, 'compile'):
+    try:
         model = torch.compile(model)
-
+        print("[*] Модель оптимизирована через torch.compile.")
+    except Exception as e:
+        print(f"[*] JIT-компиляция пропущена: {e}")
+    
+    # --- ЛОССЫ И ОПТИМИЗАТОР ---
+    criterion = get_loss_function(
+        name=args.loss, gamma=args.gamma, class_weights=class_weights, 
+        device=device, label_smoothing=args.smoothing
+    )
+    supcon_criterion = get_loss_function(name='supcon', device=device) if args.use_supcon else None
+    
+    # Используем fused=True для ускорения шага AdamW на RTX 5080
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4, fused=True)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    
+    tracker = HistoryTracker(exp_dir=exp_dir)
+    early_stopping = EarlyStopping(patience=7, mode='max', save_path=str(exp_dir / 'best_model.pth'))
     scaler = torch.amp.GradScaler('cuda')
-    tracker = HistoryTracker()
-    model_save_path = exp_dir / 'best_model.pth'
-    early_stopping = EarlyStopping(patience=10, mode='max', save_path=str(model_save_path))
 
-    optimizer = None
-    scheduler = None
-
-    # ==========================================
-    # 5. ЦИКЛ ОБУЧЕНИЯ
-    # ==========================================
-    for epoch in range(args.epochs):
-        raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
-        
-        # Управление заморозкой/разморозкой и LR Schedulers
-        if epoch == 0:
-            print(f"\n[Stage 1] Прогрев полносвязной головы ({args.warmup} эпох)...")
-            raw_model.freeze_backbone()
-            optimizer = optim.AdamW(raw_model.head.parameters(), lr=args.lr_head, weight_decay=1e-4)
-            scheduler = None 
-            
-        elif epoch == args.warmup:
-            print(f"\n[Stage 2] Разморозка бэкбона. Запуск OneCycleLR...")
-            raw_model.unfreeze_backbone()
-            optimizer = optim.AdamW(model.parameters(), lr=args.lr_backbone, weight_decay=1e-4)
-            
-            fine_tune_epochs = args.epochs - args.warmup
-            scheduler = optim.lr_scheduler.OneCycleLR(
-                optimizer,
-                max_lr=args.lr_backbone,
-                epochs=fine_tune_epochs,
-                steps_per_epoch=len(train_loader),
-                pct_start=0.1, 
-                anneal_strategy='cos',
-                final_div_factor=100.0 
-            )
-
-        # ----------------- ТРЕНИРОВКА -----------------
+    # --- ЦИКЛ ОБУЧЕНИЯ ---
+    for epoch in range(1, args.epochs + 1):
         model.train()
-        train_preds, train_labels, running_loss = [], [], 0.0
+        train_loss, train_labels, train_preds = 0.0, [], []
+        optimizer.zero_grad(set_to_none=True) # Оптимизация сброса градиентов
         
-        for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]"):
-            inputs = inputs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            
-            optimizer.zero_grad(set_to_none=True)
-
-            # 1. Геометрические аугментации
-            if args.augment:
-                inputs = gpu_augment(inputs)
-
-            # 2. MixUp / CutMix аугментации
-            if batch_collator is not None:
-                inputs, labels = batch_collator(inputs, labels)
-
-            # 3. Forward Pass
+        current_lr = optimizer.param_groups[0]['lr']
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs} [Train]")
+        
+        for i, (inputs, labels) in enumerate(pbar):
+            # Mixed Precision Forward
             with torch.amp.autocast('cuda'):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                if args.use_supcon:
+                    inputs = torch.cat(inputs, dim=0).to(device, non_blocking=True, memory_format=torch.channels_last)
+                    labels = torch.cat([labels, labels], dim=0).to(device, non_blocking=True)
+                    logits, embeddings = model(inputs, return_embeddings=True)
+                    loss = (criterion(logits, labels) + args.supcon_weight * supcon_criterion(embeddings, labels)) / args.accumulation_steps
+                else:
+                    inputs = inputs.to(device, non_blocking=True, memory_format=torch.channels_last)
+                    labels = labels.to(device, non_blocking=True)
+                    logits = model(inputs, return_embeddings=False)
+                    loss = criterion(logits, labels) / args.accumulation_steps
 
-            # 4. Backward Pass
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
             
-            if scheduler is not None:
-                scheduler.step()
+            # Шаг аккумуляции
+            if (i + 1) % args.accumulation_steps == 0 or (i + 1) == len(train_loader):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
-            # 5. Сбор метрик
-            running_loss += loss.item() * inputs.size(0)
-            train_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
+            train_loss += loss.item() * args.accumulation_steps
+            train_preds.extend(torch.argmax(logits, dim=1).cpu().numpy())
+            train_labels.extend(labels.cpu().numpy())
             
-            # Если использовался MixUp/CutMix, labels становятся вероятностями (2D тензор).
-            # Для расчета обычного Accuracy восстанавливаем главный класс через argmax.
-            if labels.ndim == 2:
-                train_labels.extend(torch.argmax(labels, dim=1).cpu().numpy())
-            else:
-                train_labels.extend(labels.cpu().numpy())
-
-        # ----------------- ВАЛИДАЦИЯ -----------------
+            if i % 10 == 0:
+                pbar.set_postfix({'LR': f"{current_lr:.1e}", 'Loss': f"{loss.item()*args.accumulation_steps:.3f}"})
+            
+        # --- ВАЛИДАЦИЯ ---
         model.eval()
-        val_preds, val_labels, val_probs, val_loss = [], [], [], 0.0
+        val_loss, val_labels, val_preds, val_probs = 0.0, [], [], []
         with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs = inputs.to(device, non_blocking=True)
+            for inputs, labels in tqdm(val_loader, desc="[Valid]"):
+                inputs = inputs.to(device, non_blocking=True, memory_format=torch.channels_last)
                 labels = labels.to(device, non_blocking=True)
                 
                 with torch.amp.autocast('cuda'):
-                    outputs = model(inputs)
-                    loss = criterion(outputs, labels)
-
-                val_loss += loss.item() * inputs.size(0)
-                val_probs.extend(torch.softmax(outputs, dim=1).cpu().numpy())
-                val_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
+                    logits = model(inputs, return_embeddings=False)
+                    loss = criterion(logits, labels)
+                
+                val_loss += loss.item()
+                probs = torch.softmax(logits.float(), dim=1)
+                val_preds.extend(torch.argmax(probs, dim=1).cpu().numpy())
                 val_labels.extend(labels.cpu().numpy())
+                val_probs.extend(probs.cpu().numpy())
 
-        # Расчет и логирование
-        metrics_step = calculate_advanced_metrics(val_labels, val_preds, np.array(val_probs))
-        tracker.update(running_loss/len(train_dataset), val_loss/len(val_dataset),
-                       accuracy_score(train_labels, train_preds), accuracy_score(val_labels, val_preds),
-                       balanced_accuracy_score(train_labels, train_preds), balanced_accuracy_score(val_labels, val_preds))
-
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f"Loss: {val_loss/len(val_dataset):.4f} | B-Acc: {balanced_accuracy_score(val_labels, val_preds):.4f} | MCC: {metrics_step['MCC']:.4f} | LR: {current_lr:.2e}")
-
-        # Early Stopping по метрике MCC
-        early_stopping(metrics_step['MCC'], raw_model)
-        if early_stopping.early_stop: 
-            print(f"\n[!] Сработал Early Stopping. Обучение прервано.")
+        scheduler.step()
+        
+        # Сбор метрик эпохи
+        v_loss = val_loss / len(val_loader)
+        v_acc = accuracy_score(val_labels, val_preds)
+        v_bacc = balanced_accuracy_score(val_labels, val_preds)
+        v_mcc = matthews_corrcoef(val_labels, val_preds)
+        t_bacc = balanced_accuracy_score(train_labels, train_preds)
+        
+        tracker.update(epoch, train_loss/len(train_loader), v_loss, accuracy_score(train_labels, train_preds), v_acc, t_bacc, v_bacc)
+        
+        print(f"\n[SUMMARY] LR: {current_lr:.2e} | Loss: {v_loss:.4f} | Acc: {v_acc:.4f} | B-Acc: {v_bacc:.4f} | MCC: {v_mcc:.4f}\n")
+        
+        early_stopping(v_bacc, model)
+        if early_stopping.early_stop:
+            print("[!] Early Stopping triggered.")
             break
 
-    # ==========================================
-    # 6. ФИНАЛИЗАЦИЯ И МЕДИЦИНСКИЙ ОТЧЕТ
-    # ==========================================
-    print(f"\n[*] Генерация финального медицинского отчета...")
-    raw_model.load_state_dict(torch.load(model_save_path, weights_only=True))
+    # --- ФИНАЛЬНЫЙ ОТЧЕТ ПОСЛЕ ОБУЧЕНИЯ ---
+    print("\n[*] Генерация финального медицинского отчета...")
+    model.load_state_dict(torch.load(exp_dir / 'best_model.pth', weights_only=True))
     model.eval()
     
-    final_preds, final_labels, final_probs = [], [], []
+    test_preds, test_labels, test_probs = [], [], []
     with torch.no_grad():
         for inputs, labels in val_loader:
-            inputs = inputs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            
+            inputs = inputs.to(device, memory_format=torch.channels_last)
             with torch.amp.autocast('cuda'):
-                outputs = model(inputs)
-            final_probs.extend(torch.softmax(outputs, dim=1).cpu().numpy())
-            final_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
-            final_labels.extend(labels.cpu().numpy())
-
-    final_metrics = calculate_advanced_metrics(final_labels, final_preds, np.array(final_probs))
-    save_medical_report(exp_dir, final_labels, final_preds, np.array(final_probs), final_metrics)
-    plot_training_results(tracker, final_labels, final_preds, save_path=str(exp_dir / 'training_results.png'))
+                logits = model(inputs, return_embeddings=False)
+            probs = torch.softmax(logits.float(), dim=1)
+            test_preds.extend(torch.argmax(probs, dim=1).cpu().numpy())
+            test_labels.extend(labels.numpy())
+            test_probs.extend(probs.cpu().numpy())
+            
+    adv_metrics = calculate_advanced_metrics(test_labels, test_preds, np.array(test_probs))
+    save_medical_report(exp_dir, test_labels, test_preds, np.array(test_probs), adv_metrics)
+    plot_training_results(tracker, test_labels, test_preds, save_path=str(exp_dir / 'training_results.png'))
     
-    print(f"\n[SUCCESS] Эксперимент завершен!")
-    print(f"Результаты лежат в: {exp_dir}")
+    print(f"[SUCCESS] Результаты сохранены в: {exp_dir}")
 
 if __name__ == '__main__':
-    train_model()
+    main()

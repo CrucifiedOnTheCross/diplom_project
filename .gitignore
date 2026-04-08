@@ -1,0 +1,13 @@
+dataset/
+dataset_*/
+diploma_results*/
+gan_data/
+gan_training_runs/
+gradcam_results/
+experiments/
+stylegan*/
+*.csv
+.ipynb_checkpoints/
+__pycache__/
+.Trash-1000/
+stylegan2-ada-pytorch/

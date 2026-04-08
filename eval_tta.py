@@ -8,7 +8,7 @@ import argparse
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
 
-# Импорты ваших модулей
+# Импорты ваших модулейpuy
 from model import SkinLesionClassifier
 from ram_dataset import RAMFullDataset
 from metrics import calculate_advanced_metrics, save_medical_report
