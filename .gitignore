@@ -67,6 +67,8 @@ gradcam_diploma/
 binary_threshold_analysis_20_raw_supcon/
 threshold_analysis_20_raw_supcon/
 feature_aware_report/
+report_runs/
+.archive_tmp/
 
 # External repos
 stylegan3-brecahad/
