@@ -57,6 +57,15 @@ python train.py --exp_name "12_prep_supcon" --loss "ce" --use_supcon --supcon_we
 # 6.2 Ультимативное комбо (SupCon + Идеальный баланс от GAN)
 python train.py --exp_name "13_gan_supcon" --loss "ce" --use_supcon --supcon_weight 0.1 --sampling_mode "none" --data_dir "dataset_augmented" --out_dir $OUT_DIR --batch_size 64
 
+# ========================================================================
+# ЭТАП 7: Weighted Focal Loss (Комбо: Веса + Сложность)
+# ========================================================================
+echo "--- ЭТАП 7: Weighted Focal Loss (The Ultimate Balance) ---"
+
+python train.py --exp_name "14_prep_weighted_focal_g0.5" --loss "focal" --gamma 0.5 --use_weights --sampling_mode "none" --data_dir "dataset_preprocessed" --out_dir $OUT_DIR --batch_size 64
+python train.py --exp_name "15_prep_weighted_focal_g1.0" --loss "focal" --gamma 1.0 --use_weights --sampling_mode "none" --data_dir "dataset_preprocessed" --out_dir $OUT_DIR --batch_size 64
+python train.py --exp_name "16_prep_weighted_focal_g2.0" --loss "focal" --gamma 2.0 --use_weights --sampling_mode "none" --data_dir "dataset_preprocessed" --out_dir $OUT_DIR --batch_size 64
+
 echo "================================================================="
 echo " ВСЕ 13 ЭКСПЕРИМЕНТОВ УСПЕШНО ЗАВЕРШЕНЫ!                         "
 echo "================================================================="

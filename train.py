@@ -4,6 +4,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from pathlib import Path
+import random
 from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, matthews_corrcoef
@@ -22,6 +23,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=50, help="Кол-во эпох")
     
     # Настройки батча и оптимизации памяти
+    parser.add_argument('--aug_type', type=int, default=1, help='1 - старая базовая, 2 - новая продвинутая')    
     parser.add_argument('--batch_size', type=int, default=8, help="Физический батч (рекомендуется 8-16)")
     parser.add_argument('--accumulation_steps', type=int, default=4, help="Шаги аккумуляции (8*4=32)")
     parser.add_argument('--lr', type=float, default=1e-4, help="Скорость обучения")
@@ -36,8 +38,16 @@ def parse_args():
     # Контрастивное обучение
     parser.add_argument('--use_supcon', action='store_true', help="Включить SupCon")
     parser.add_argument('--supcon_weight', type=float, default=0.1, help="Вес SupCon лосса")
+
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     
     return parser.parse_args()
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 def get_sampler_and_weights(dataset, mode='oversample'):
     labels = dataset.labels.numpy()
@@ -61,6 +71,8 @@ def get_sampler_and_weights(dataset, mode='oversample'):
 
 def main():
     args = parse_args()
+
+    set_seed(args.seed)
     
     # --- ГЛОБАЛЬНЫЕ ОПТИМИЗАЦИИ ---
     torch.backends.cudnn.benchmark = True 
@@ -79,8 +91,14 @@ def main():
     print(f"[*] Эффективный батч: {args.batch_size * args.accumulation_steps}")
 
     # --- ПОДГОТОВКА ДАННЫХ (RAM + Многопоточность) ---
-    train_views = 2 if args.use_supcon else 1
-    train_dataset = HAMRAMDataset(Path(args.data_dir) / 'train', mode='train', n_views=train_views)
+    train_dir = Path(args.data_dir) / 'train'
+    
+    train_dataset = HAMRAMDataset(
+        folder_path=train_dir, 
+        mode='train', 
+        n_views=2 if args.use_supcon else 1,
+        aug_type=args.aug_type # Передаем выбранный тип
+    )
     val_dataset = HAMRAMDataset(Path(args.data_dir) / 'valid', mode='valid', n_views=1)
     
     sampler, class_weights = None, None

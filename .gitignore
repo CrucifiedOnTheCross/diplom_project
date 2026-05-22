@@ -1,13 +1,102 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.env.*
+!.env.example
+credentials.json
+secrets.json
+service-account.json
+
+# Local IDE/system files
+.idea/
+.vscode/
+.DS_Store
+.Trash-1000/
+
+# Audit reports
+audit_md/
+audit_md_fast/
+audit_md*/
+audit_project_old.py
+
+# Datasets
 dataset/
 dataset_*/
-diploma_results*/
+datasets/
+datasets_*/
+dataset_augmented/
+dataset_preprocessed/
+dataset_preprocessed_v2/
+datasets_gan_mix/
+datasets_gan_mix_raw/
+
+# GAN data and training outputs
 gan_data/
+gan_data_raw/
+gan_data_raw_zips/
 gan_training_runs/
-gradcam_results/
+gan_training_runs_batch32/
+gan_training_runs_quality/
+gan_training_runs_transfer/
+gan_analysis/
+synthetic_mixing_runs/
+
+# Experiment outputs
 experiments/
+science_folder/
+diploma_results/
+diploma_results__full/
+diploma_figures/
+gradcam_results/
+gradcam_diploma/
+binary_threshold_analysis_20_raw_supcon/
+threshold_analysis_20_raw_supcon/
+
+# External repos
+stylegan3-brecahad/
 stylegan*/
-*.csv
-.ipynb_checkpoints/
-__pycache__/
-.Trash-1000/
 stylegan2-ada-pytorch/
+
+# Heavy model/artifact files
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.onnx
+*.h5
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
+*.7z
+*.rar
+
+# Data/result tables
+*.csv
+
+# Logs
+*.log
+logs/
+wandb/
+mlruns/
+runs/
+
+# Generated presentations/figures archives
+presentation_figures.tar.gz
