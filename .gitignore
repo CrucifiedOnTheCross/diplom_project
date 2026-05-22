@@ -42,6 +42,7 @@ dataset_preprocessed/
 dataset_preprocessed_v2/
 datasets_gan_mix/
 datasets_gan_mix_raw/
+datasets_feature_aware/
 
 # GAN data and training outputs
 gan_data/
@@ -53,6 +54,7 @@ gan_training_runs_quality/
 gan_training_runs_transfer/
 gan_analysis/
 synthetic_mixing_runs/
+embedding_analysis/
 
 # Experiment outputs
 experiments/
@@ -64,6 +66,7 @@ gradcam_results/
 gradcam_diploma/
 binary_threshold_analysis_20_raw_supcon/
 threshold_analysis_20_raw_supcon/
+feature_aware_report/
 
 # External repos
 stylegan3-brecahad/
