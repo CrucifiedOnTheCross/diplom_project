@@ -57,6 +57,7 @@ from typing import Dict, List, Optional, Tuple
 
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+DATASET_CACHE_NAMES = {"ham_cache_u8.pt", "cache_uint8_256.pt"}
 
 
 # ---------------------------------------------------------------------
@@ -142,9 +143,17 @@ def clone_dataset_tree(src_root: Path, dst_root: Path, mode: str) -> None:
         dst_dir.mkdir(parents=True, exist_ok=True)
 
         for fname in files:
+            if fname in DATASET_CACHE_NAMES:
+                continue
             src = root_path / fname
             dst = dst_dir / fname
             link_or_copy_file(src, dst, mode)
+
+
+def remove_dataset_caches(dataset_root: Path) -> None:
+    for cache_name in DATASET_CACHE_NAMES:
+        for path in dataset_root.rglob(cache_name):
+            path.unlink(missing_ok=True)
 
 
 def parse_components(components: str) -> Dict[str, float]:
@@ -342,6 +351,7 @@ def main() -> None:
         # 1) Клонируем базовый датасет полностью
         print(f"[*] Клонирование базового датасета: {src_dataset} -> {dst_dataset}")
         clone_dataset_tree(src_dataset, dst_dataset, mode=args.link_mode)
+        remove_dataset_caches(dst_dataset)
 
         manifest_rows: List[dict] = []
 

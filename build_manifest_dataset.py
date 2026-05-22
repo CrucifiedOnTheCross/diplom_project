@@ -12,6 +12,7 @@ from typing import List
 
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+DATASET_CACHE_NAMES = {"ham_cache_u8.pt", "cache_uint8_256.pt"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,9 +71,17 @@ def clone_tree(src_root: Path, dst_root: Path, mode: str) -> None:
         dst_dir = dst_root / src_dir.relative_to(src_root)
         dst_dir.mkdir(parents=True, exist_ok=True)
         for file_name in files:
+            if file_name in DATASET_CACHE_NAMES:
+                continue
             src = src_dir / file_name
             dst = dst_dir / file_name
             link_or_copy_file(src, dst, mode)
+
+
+def remove_dataset_caches(dataset_root: Path) -> None:
+    for cache_name in DATASET_CACHE_NAMES:
+        for path in dataset_root.rglob(cache_name):
+            path.unlink(missing_ok=True)
 
 
 def build_dataset(src_dataset: Path, manifest_path: Path, out_dataset: Path, link_mode: str, overwrite: bool) -> None:
@@ -81,6 +90,7 @@ def build_dataset(src_dataset: Path, manifest_path: Path, out_dataset: Path, lin
 
     ensure_empty_dir(out_dataset, overwrite)
     clone_tree(src_dataset, out_dataset, link_mode)
+    remove_dataset_caches(out_dataset)
 
     rows = read_manifest(manifest_path)
     manifest_rows = []
@@ -110,6 +120,7 @@ def build_dataset(src_dataset: Path, manifest_path: Path, out_dataset: Path, lin
 
     print(f"[SUCCESS] Built dataset: {out_dataset.resolve()}")
     print(f"[*] Added synthetic images: {len(manifest_rows)}")
+    print("[*] Dataset tensor caches were not copied; train.py will rebuild cache from the final image set.")
 
 
 def main() -> None:
