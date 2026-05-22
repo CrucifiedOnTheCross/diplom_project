@@ -196,7 +196,9 @@ def main():
         if not exp_folder.is_dir():
             continue
 
-        report_path = exp_folder / 'medical_metrics_report.txt'
+        test_report_path = exp_folder / 'medical_metrics_report_test.txt'
+        valid_report_path = exp_folder / 'medical_metrics_report.txt'
+        report_path = test_report_path if test_report_path.exists() else valid_report_path
         config_path = exp_folder / 'config.txt'
         calibration_path = exp_folder / 'calibration_report.json'
 
@@ -213,6 +215,7 @@ def main():
 
         exp_data = {'Experiment_Folder': exp_folder.name}
         exp_data['Config'] = load_config(config_path)
+        exp_data['Medical_Report_Source'] = 'test' if test_report_path.exists() else 'valid_legacy'
 
         if has_medical:
             exp_data.update(parse_report(report_path))
@@ -250,7 +253,7 @@ def main():
     output_file = 'all_experiments_summary.csv'
 
     base_fields = [
-        'Experiment_Folder', 'Config',
+        'Experiment_Folder', 'Config', 'Medical_Report_Source',
         'Balanced_Accuracy', 'MCC',
         'F1_Macro', 'F1_Weighted',
         'Accuracy', 'Sensitivity_Global', 'Specificity_Global',

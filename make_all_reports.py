@@ -98,10 +98,24 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
     if args.force:
         threshold_base.append("--force")
 
+    test_report_cmd = [
+        py,
+        script("evaluate_test_reports.py"),
+        "--experiments_dir",
+        args.science_dir,
+        "--device",
+        args.device,
+        "--batch_size",
+        str(args.batch_size),
+    ]
+    if args.force:
+        test_report_cmd.append("--force")
+
     steps = [
         Step("calibration", calibration_cmd, [science_dir, Path("calibration_eval.py")]),
         Step("threshold_malignant", threshold_base + ["--mode", "malignant"], [science_dir, Path("threshold_eval.py")]),
         Step("threshold_melanoma", threshold_base + ["--mode", "melanoma"], [science_dir, Path("threshold_eval.py")]),
+        Step("test_medical_reports", test_report_cmd, [science_dir, Path("evaluate_test_reports.py")]),
         Step("experiment_summary", [py, script("update_experiment_summary.py")], [science_dir, Path("update_experiment_summary.py")]),
     ]
 

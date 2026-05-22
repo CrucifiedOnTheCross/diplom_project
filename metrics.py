@@ -164,12 +164,12 @@ def plot_training_results(history_tracker, y_true_val, y_pred_val, save_path='tr
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
 
-def save_medical_report(exp_dir, y_true, y_pred, y_probs, adv_metrics):
+def save_medical_report(exp_dir, y_true, y_pred, y_probs, adv_metrics, filename='medical_metrics_report.txt'):
     """Генерация подробного текстового отчета по результатам эксперимента."""
     report_text = classification_report(y_true, y_pred, target_names=CLASS_NAMES)
     cm_norm = adv_metrics['CM_Norm']
     
-    with open(exp_dir / 'medical_metrics_report.txt', 'w', encoding='utf-8') as f:
+    with open(exp_dir / filename, 'w', encoding='utf-8') as f:
         f.write("====================================================\n")
         f.write("      MEDICAL CLASSIFICATION METRICS REPORT\n")
         f.write("====================================================\n\n")

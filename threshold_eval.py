@@ -5,8 +5,8 @@ threshold_eval.py
 Автоматически:
 1) проходит по всем папкам экспериментов;
 2) загружает best_model.pth и calibration_report.json;
-3) считает оптимальные threshold ДО и ПОСЛЕ calibration;
-4) строит таблицу Sensitivity / Specificity / Precision / F1 / MCC / BAcc;
+3) выбирает оптимальные threshold на valid ДО и ПОСЛЕ calibration;
+4) применяет выбранные threshold на test;
 5) сохраняет per-experiment CSV + JSON и общий summary CSV.
 
 Поддерживаемые режимы:
@@ -113,30 +113,35 @@ def parse_config(config_path: Path) -> Dict[str, str]:
     return cfg
 
 
-def resolve_test_dir(data_dir: str) -> Tuple[Path, str]:
+def resolve_eval_dirs(data_dir: str) -> Tuple[Path, Path, str]:
     """
-    В большинстве случаев test лежит в data_dir/test.
+    В большинстве случаев valid/test лежат в data_dir.
     Для dataset_augmented возможен fallback на dataset_preprocessed/test,
-    если своего test нет.
+    если своих valid/test нет.
     """
     p = Path(data_dir)
+    valid_dir = p / "valid"
     test_dir = p / "test"
-    if test_dir.exists():
-        return test_dir, f"direct:{data_dir}"
+    if valid_dir.exists() and test_dir.exists():
+        return valid_dir, test_dir, f"direct:{data_dir}"
 
     if p.name == "dataset_augmented":
-        fallback = Path("dataset_preprocessed") / "test"
-        if fallback.exists():
-            return fallback, f"fallback:{data_dir}->dataset_preprocessed"
+        fallback = Path("dataset_preprocessed")
+        valid_dir = fallback / "valid"
+        test_dir = fallback / "test"
+        if valid_dir.exists() and test_dir.exists():
+            return valid_dir, test_dir, f"fallback:{data_dir}->dataset_preprocessed"
 
-    fallback = Path("dataset") / "test"
-    if fallback.exists():
-        return fallback, f"fallback:{data_dir}->dataset"
+    fallback = Path("dataset")
+    valid_dir = fallback / "valid"
+    test_dir = fallback / "test"
+    if valid_dir.exists() and test_dir.exists():
+        return valid_dir, test_dir, f"fallback:{data_dir}->dataset"
 
-    raise FileNotFoundError(f"Не найден test split для data_dir={data_dir}")
+    raise FileNotFoundError(f"Не найдены valid/test split для data_dir={data_dir}")
 
 
-def build_loader(test_dir: Path, batch_size: int, num_workers: int):
+def build_loader(split_dir: Path, batch_size: int, num_workers: int):
     transform = v2.Compose([
         v2.Resize((224, 224), antialias=True),
         v2.ToImage(),
@@ -144,7 +149,7 @@ def build_loader(test_dir: Path, batch_size: int, num_workers: int):
         v2.Normalize(mean=[0.485, 0.456, 0.406],
                      std=[0.229, 0.224, 0.225]),
     ])
-    dataset = datasets.ImageFolder(str(test_dir), transform=transform)
+    dataset = datasets.ImageFolder(str(split_dir), transform=transform)
 
     if dataset.classes != CLASS_NAMES:
         raise ValueError(
@@ -236,6 +241,35 @@ def evaluate_thresholds(y_true_bin: np.ndarray, probs_bin: np.ndarray) -> List[D
             "tn": int(tn),
         })
     return rows
+
+
+def evaluate_fixed_threshold(y_true_bin: np.ndarray, probs_bin: np.ndarray, threshold: float) -> Dict[str, float]:
+    y_pred = (probs_bin >= threshold).astype(int)
+    precision = precision_score(y_true_bin, y_pred, zero_division=0)
+    recall = recall_score(y_true_bin, y_pred, zero_division=0)
+    f1 = f1_score(y_true_bin, y_pred, zero_division=0)
+    acc = accuracy_score(y_true_bin, y_pred)
+    bacc = balanced_accuracy_score(y_true_bin, y_pred)
+    mcc = matthews_corrcoef(y_true_bin, y_pred) if len(np.unique(y_pred)) > 1 else 0.0
+    tn, fp, fn, tp = confusion_matrix(y_true_bin, y_pred, labels=[0, 1]).ravel()
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    youden = recall + specificity - 1.0
+    return {
+        "threshold": float(threshold),
+        "precision": float(precision),
+        "recall": float(recall),
+        "sensitivity": float(recall),
+        "specificity": float(specificity),
+        "f1": float(f1),
+        "accuracy": float(acc),
+        "balanced_accuracy": float(bacc),
+        "mcc": float(mcc),
+        "youden": float(youden),
+        "tp": int(tp),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tn": int(tn),
+    }
 
 
 def select_best_row(rows: List[Dict[str, float]], criterion: str) -> Dict[str, float]:
@@ -345,7 +379,7 @@ def main():
         cfg = parse_config(config_path)
         data_dir = cfg.get("data_dir", "dataset")
         try:
-            test_dir, eval_policy = resolve_test_dir(data_dir)
+            valid_dir, test_dir, eval_policy = resolve_eval_dirs(data_dir)
         except Exception as e:
             print(f"[SKIP] {exp_name} | {e}")
             skip_rows.append({
@@ -361,37 +395,51 @@ def main():
             print(f"\n[START] {exp_name}")
             print(f"[*] data_dir from config: {data_dir}")
             print(f"[*] eval policy: {eval_policy}")
+            print(f"[*] valid: {valid_dir}")
             print(f"[*] test: {test_dir}")
 
             model, device_obj = load_model(model_path, args.device)
-            dataset, loader = build_loader(test_dir, args.batch_size, args.num_workers)
+            valid_dataset, valid_loader = build_loader(valid_dir, args.batch_size, args.num_workers)
+            test_dataset, test_loader = build_loader(test_dir, args.batch_size, args.num_workers)
 
-            # До calibration
-            y_true_before, probs_before = collect_binary_probs(model, loader, device_obj, args.mode, temperature=None)
-            rows_before = evaluate_thresholds(y_true_before, probs_before)
-            best_before = select_best_row(rows_before, args.criterion)
-            save_threshold_rows(rows_before, per_exp_csv_before)
+            # До calibration: threshold выбирается на valid, метрики считаются на test.
+            y_valid_before, p_valid_before = collect_binary_probs(model, valid_loader, device_obj, args.mode, temperature=None)
+            valid_rows_before = evaluate_thresholds(y_valid_before, p_valid_before)
+            valid_best_before = select_best_row(valid_rows_before, args.criterion)
+            save_threshold_rows(valid_rows_before, per_exp_csv_before)
+
+            y_test_before, p_test_before = collect_binary_probs(model, test_loader, device_obj, args.mode, temperature=None)
+            best_before = evaluate_fixed_threshold(y_test_before, p_test_before, valid_best_before["threshold"])
 
             # После calibration
             if temperature is not None:
-                y_true_after, probs_after = collect_binary_probs(model, loader, device_obj, args.mode, temperature=temperature)
-                rows_after = evaluate_thresholds(y_true_after, probs_after)
-                best_after = select_best_row(rows_after, args.criterion)
-                save_threshold_rows(rows_after, per_exp_csv_after)
+                y_valid_after, p_valid_after = collect_binary_probs(model, valid_loader, device_obj, args.mode, temperature=temperature)
+                valid_rows_after = evaluate_thresholds(y_valid_after, p_valid_after)
+                valid_best_after = select_best_row(valid_rows_after, args.criterion)
+                save_threshold_rows(valid_rows_after, per_exp_csv_after)
+
+                y_test_after, p_test_after = collect_binary_probs(model, test_loader, device_obj, args.mode, temperature=temperature)
+                best_after = evaluate_fixed_threshold(y_test_after, p_test_after, valid_best_after["threshold"])
             else:
-                rows_after = []
+                valid_best_after = None
                 best_after = None
 
             report = {
                 "experiment": exp_name,
                 "mode": args.mode,
                 "criterion": args.criterion,
+                "threshold_selection_split": "valid",
+                "metrics_split": "test",
                 "model_path": str(model_path),
                 "data_dir": data_dir,
                 "eval_policy": eval_policy,
+                "valid_dir": str(valid_dir),
                 "test_dir": str(test_dir),
-                "num_test": len(dataset),
+                "num_valid": len(valid_dataset),
+                "num_test": len(test_dataset),
                 "temperature": temperature,
+                "valid_best_before": valid_best_before,
+                "valid_best_after": valid_best_after,
                 "best_before": best_before,
                 "best_after": best_after,
             }
