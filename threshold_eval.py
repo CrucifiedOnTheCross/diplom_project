@@ -77,6 +77,11 @@ def parse_args():
         help="Если best_model.pth слишком свежий, эксперимент считается активным и пропускается",
     )
     parser.add_argument("--force", action="store_true", help="Пересчитать даже если threshold_report уже существует")
+    parser.add_argument(
+        "--only-missing",
+        action="store_true",
+        help="Считать только отсутствующие или устаревшие threshold-отчеты. Это поведение по умолчанию без --force.",
+    )
     return parser.parse_args()
 
 
@@ -331,6 +336,32 @@ def load_temperature(calibration_path: Path) -> float | None:
         return None
 
 
+def threshold_outputs_are_current(outputs: List[Path], dependencies: List[Path]) -> bool:
+    if not outputs or not all(path.exists() for path in outputs):
+        return False
+    if not dependencies or not all(path.exists() for path in dependencies):
+        return False
+    newest_dependency = max(path.stat().st_mtime for path in dependencies)
+    return all(path.stat().st_mtime >= newest_dependency for path in outputs)
+
+
+def softmax_np(logits: np.ndarray) -> np.ndarray:
+    z = logits - np.max(logits, axis=1, keepdims=True)
+    exp_z = np.exp(z)
+    return exp_z / np.sum(exp_z, axis=1, keepdims=True)
+
+
+def binary_probs_from_logits(logits: np.ndarray, labels: np.ndarray, mode: str, temperature: float | None = None) -> Tuple[np.ndarray, np.ndarray]:
+    if temperature is not None and temperature > 0:
+        logits = logits / float(temperature)
+    probs = softmax_np(logits)
+    if mode == "melanoma":
+        return (labels == MEL_IDX).astype(int), probs[:, MEL_IDX]
+    if mode == "malignant":
+        return np.isin(labels, MALIGNANT_IDXS).astype(int), probs[:, MALIGNANT_IDXS].sum(axis=1)
+    raise ValueError(f"Неизвестный mode: {mode}")
+
+
 def main():
     args = parse_args()
     experiments_dir = Path(args.experiments_dir)
@@ -347,13 +378,35 @@ def main():
         model_path = exp_dir / "best_model.pth"
         config_path = exp_dir / "config.txt"
         calibration_path = exp_dir / "calibration_report.json"
+        valid_logits_path = exp_dir / "valid_logits.npz"
+        test_logits_path = exp_dir / "test_logits.npz"
 
         per_exp_json = exp_dir / f"threshold_report_{args.mode}_{args.criterion}.json"
         per_exp_csv_before = exp_dir / f"threshold_curve_before_{args.mode}.csv"
         per_exp_csv_after = exp_dir / f"threshold_curve_after_{args.mode}.csv"
 
-        if per_exp_json.exists() and not args.force:
-            print(f"[SKIP] {exp_name} | threshold report already exists")
+        threshold_dependencies = [model_path, valid_logits_path, test_logits_path]
+        threshold_outputs = [per_exp_json, per_exp_csv_before]
+        if calibration_path.exists():
+            threshold_dependencies.append(calibration_path)
+            threshold_outputs.append(per_exp_csv_after)
+        if not args.force and threshold_outputs_are_current(
+            threshold_outputs,
+            threshold_dependencies,
+        ):
+            print(f"[SKIP] {exp_name} | threshold report is up to date")
+            continue
+
+        if not args.force:
+            print(f"[RUN] {exp_name} | missing or outdated threshold report")
+
+        if not valid_logits_path.exists() or not test_logits_path.exists():
+            print(f"[SKIP] {exp_name} | prediction cache missing; run collect_predictions.py first")
+            skip_rows.append({
+                "experiment": exp_name,
+                "reason": "missing prediction cache",
+                "detail": "valid_logits.npz/test_logits.npz missing",
+            })
             continue
 
         finished, reason_finished = is_experiment_finished(exp_dir)
@@ -398,27 +451,30 @@ def main():
             print(f"[*] valid: {valid_dir}")
             print(f"[*] test: {test_dir}")
 
-            model, device_obj = load_model(model_path, args.device)
-            valid_dataset, valid_loader = build_loader(valid_dir, args.batch_size, args.num_workers)
-            test_dataset, test_loader = build_loader(test_dir, args.batch_size, args.num_workers)
+            with np.load(valid_logits_path, allow_pickle=True) as valid_cache:
+                valid_logits = valid_cache["logits"].astype(np.float32)
+                valid_labels = valid_cache["y_true"].astype(np.int64)
+            with np.load(test_logits_path, allow_pickle=True) as test_cache:
+                test_logits = test_cache["logits"].astype(np.float32)
+                test_labels = test_cache["y_true"].astype(np.int64)
 
             # До calibration: threshold выбирается на valid, метрики считаются на test.
-            y_valid_before, p_valid_before = collect_binary_probs(model, valid_loader, device_obj, args.mode, temperature=None)
+            y_valid_before, p_valid_before = binary_probs_from_logits(valid_logits, valid_labels, args.mode, temperature=None)
             valid_rows_before = evaluate_thresholds(y_valid_before, p_valid_before)
             valid_best_before = select_best_row(valid_rows_before, args.criterion)
             save_threshold_rows(valid_rows_before, per_exp_csv_before)
 
-            y_test_before, p_test_before = collect_binary_probs(model, test_loader, device_obj, args.mode, temperature=None)
+            y_test_before, p_test_before = binary_probs_from_logits(test_logits, test_labels, args.mode, temperature=None)
             best_before = evaluate_fixed_threshold(y_test_before, p_test_before, valid_best_before["threshold"])
 
             # После calibration
             if temperature is not None:
-                y_valid_after, p_valid_after = collect_binary_probs(model, valid_loader, device_obj, args.mode, temperature=temperature)
+                y_valid_after, p_valid_after = binary_probs_from_logits(valid_logits, valid_labels, args.mode, temperature=temperature)
                 valid_rows_after = evaluate_thresholds(y_valid_after, p_valid_after)
                 valid_best_after = select_best_row(valid_rows_after, args.criterion)
                 save_threshold_rows(valid_rows_after, per_exp_csv_after)
 
-                y_test_after, p_test_after = collect_binary_probs(model, test_loader, device_obj, args.mode, temperature=temperature)
+                y_test_after, p_test_after = binary_probs_from_logits(test_logits, test_labels, args.mode, temperature=temperature)
                 best_after = evaluate_fixed_threshold(y_test_after, p_test_after, valid_best_after["threshold"])
             else:
                 valid_best_after = None
@@ -435,8 +491,8 @@ def main():
                 "eval_policy": eval_policy,
                 "valid_dir": str(valid_dir),
                 "test_dir": str(test_dir),
-                "num_valid": len(valid_dataset),
-                "num_test": len(test_dataset),
+                "num_valid": len(valid_labels),
+                "num_test": len(test_labels),
                 "temperature": temperature,
                 "valid_best_before": valid_best_before,
                 "valid_best_after": valid_best_after,

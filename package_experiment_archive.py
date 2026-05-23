@@ -184,6 +184,7 @@ def copy_science_reports(science_dir: Path, bundle_dir: Path, copied: List[dict]
         "*.txt",
         "*.csv",
         "*.json",
+        "*.npz",
         "*.png",
     ]
     exclude_exts = set()

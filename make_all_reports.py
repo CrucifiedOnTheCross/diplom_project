@@ -31,9 +31,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--threshold-criterion", default="youden", choices=["youden", "mcc", "f1", "balanced_accuracy"])
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--strict", action="store_true", help="Stop on the first failed optional step")
     parser.add_argument("--force", action="store_true", help="Forward --force to calibration/threshold scripts")
+    parser.add_argument("--only-missing", action="store_true", help="Run only missing or outdated reports where supported")
+    parser.add_argument(
+        "--stage",
+        action="append",
+        choices=["collect-predictions", "medical", "test-eval", "calibration", "threshold", "summary", "significance", "plots", "feature-aware", "gradcam", "diploma-figures", "package"],
+        help="Run only one reporting stage. Can be provided more than once.",
+    )
+    parser.add_argument("--all", action="store_true", help="Run the full stage-based reporting pipeline")
+    parser.add_argument("--run-collect-predictions", action="store_true")
+    parser.add_argument("--run-test-eval", action="store_true")
+    parser.add_argument("--run-calibration", action="store_true")
+    parser.add_argument("--run-threshold", action="store_true")
+    parser.add_argument("--run-summary", action="store_true")
     parser.add_argument("--run-significance", action="store_true", help="Run predefined pairwise significance analysis")
+    parser.add_argument("--fast", action="store_true", help="Use fast statistical settings where supported")
+    parser.add_argument("--final", action="store_true", help="Use final statistical settings where supported")
+    parser.add_argument("--significance-workers", type=int, default=4)
 
     parser.add_argument("--include-feature-aware", action="store_true")
     parser.add_argument("--feature-aware-baseline", default="")
@@ -50,6 +67,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--include-gradcam", action="store_true")
     parser.add_argument("--include-diploma-figures", action="store_true")
+    parser.add_argument("--include-embedding-plots", action="store_true")
+    parser.add_argument("--include-checkpoints", action="store_true")
+    parser.add_argument("--output-archive", default="")
     parser.add_argument("--diploma-fig-dir", default="diploma_figures")
     parser.add_argument("--diploma-model-path", default="science_folder/20_raw_supcon/best_model.pth")
     parser.add_argument("--diploma-dataset-root", default="dataset")
@@ -66,10 +86,61 @@ def existing_scripts(names: List[str]) -> List[Path]:
     return [Path(name) for name in names if Path(name).exists()]
 
 
+def selected_stages(args: argparse.Namespace) -> set[str]:
+    if args.stage:
+        stages = set(args.stage)
+        if "test-eval" in stages:
+            stages.add("medical")
+        return stages
+
+    flag_map = {
+        "collect-predictions": args.run_collect_predictions,
+        "medical": args.run_test_eval,
+        "calibration": args.run_calibration,
+        "threshold": args.run_threshold,
+        "summary": args.run_summary,
+        "significance": args.run_significance,
+    }
+    selected = {stage for stage, enabled in flag_map.items() if enabled}
+    if selected:
+        return selected
+
+    selected = {"collect-predictions", "medical", "calibration", "threshold", "summary", "plots"}
+    if args.all:
+        selected.update({"significance", "package"})
+    if args.include_feature_aware:
+        selected.add("feature-aware")
+    if args.include_gradcam:
+        selected.add("gradcam")
+    if args.include_diploma_figures:
+        selected.add("diploma-figures")
+    if args.run_significance:
+        selected.add("significance")
+    return selected
+
+
 def build_steps(args: argparse.Namespace) -> List[Step]:
     py = sys.executable
     science_dir = Path(args.science_dir)
     summary = Path(args.summary)
+    stages = selected_stages(args)
+
+    collect_cmd = [
+        py,
+        script("collect_predictions.py"),
+        "--science-dir",
+        args.science_dir,
+        "--device",
+        args.device,
+        "--batch-size",
+        str(args.batch_size),
+        "--num-workers",
+        str(args.num_workers),
+    ]
+    if args.force:
+        collect_cmd.append("--force")
+    else:
+        collect_cmd.append("--only-missing")
 
     calibration_cmd = [
         py,
@@ -78,11 +149,15 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
         args.science_dir,
         "--batch_size",
         str(args.batch_size),
+        "--num_workers",
+        str(args.num_workers),
         "--device",
         args.device,
     ]
     if args.force:
         calibration_cmd.append("--force")
+    else:
+        calibration_cmd.append("--only-missing")
 
     threshold_base = [
         py,
@@ -98,6 +173,8 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
     ]
     if args.force:
         threshold_base.append("--force")
+    else:
+        threshold_base.append("--only-missing")
 
     test_report_cmd = [
         py,
@@ -109,30 +186,55 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
         "--batch_size",
         str(args.batch_size),
     ]
-    if args.force or args.run_significance:
+    if args.force:
         test_report_cmd.append("--force")
+    else:
+        test_report_cmd.append("--only-missing")
 
-    steps = [
-        Step("calibration", calibration_cmd, [science_dir, Path("calibration_eval.py")]),
-        Step("threshold_malignant", threshold_base + ["--mode", "malignant"], [science_dir, Path("threshold_eval.py")]),
-        Step("threshold_melanoma", threshold_base + ["--mode", "melanoma"], [science_dir, Path("threshold_eval.py")]),
-        Step("test_medical_reports", test_report_cmd, [science_dir, Path("evaluate_test_reports.py")]),
-        Step("experiment_summary", [py, script("update_experiment_summary.py")], [science_dir, Path("update_experiment_summary.py")]),
-    ]
+    steps: List[Step] = []
 
-    if args.run_significance:
-        steps.append(
-            Step(
-                "significance_analysis",
-                [py, script("run_significance_analysis.py"), "--science-dir", args.science_dir],
-                [science_dir, Path("run_significance_analysis.py"), Path("compare_model_significance.py")],
-            )
-        )
+    if "collect-predictions" in stages:
+        steps.append(Step("collect_predictions", collect_cmd, [science_dir, Path("collect_predictions.py")]))
 
-    for plot_script in existing_scripts(["plot_pareto.py", "plot_clinical_pareto.py", "plot_threshold_shift.py"]):
-        steps.append(Step(plot_script.stem, [py, str(plot_script)], [summary, plot_script]))
+    if "calibration" in stages:
+        steps.append(Step("calibration", calibration_cmd, [science_dir, Path("calibration_eval.py")]))
 
-    if args.include_feature_aware:
+    if "threshold" in stages:
+        steps.extend([
+            Step("threshold_malignant", threshold_base + ["--mode", "malignant"], [science_dir, Path("threshold_eval.py")]),
+            Step("threshold_melanoma", threshold_base + ["--mode", "melanoma"], [science_dir, Path("threshold_eval.py")]),
+        ])
+
+    if "medical" in stages or "test-eval" in stages:
+        steps.append(Step("test_medical_reports", test_report_cmd, [science_dir, Path("evaluate_test_reports.py")]))
+
+    if "summary" in stages:
+        steps.append(Step("experiment_summary", [py, script("update_experiment_summary.py")], [science_dir, Path("update_experiment_summary.py")]))
+
+    if "significance" in stages:
+        significance_cmd = [
+            py,
+            script("run_significance_analysis.py"),
+            "--science-dir",
+            args.science_dir,
+            "--num-workers",
+            str(args.significance_workers),
+        ]
+        if args.final:
+            significance_cmd.append("--final")
+        elif args.fast:
+            significance_cmd.append("--fast")
+        if args.force:
+            significance_cmd.append("--force")
+        else:
+            significance_cmd.append("--only-missing")
+        steps.append(Step("significance_analysis", significance_cmd, [science_dir, Path("run_significance_analysis.py"), Path("compare_model_significance.py")]))
+
+    if "plots" in stages:
+        for plot_script in existing_scripts(["plot_pareto.py", "plot_clinical_pareto.py", "plot_threshold_shift.py"]):
+            steps.append(Step(plot_script.stem, [py, str(plot_script)], [summary, plot_script]))
+
+    if "feature-aware" in stages:
         if not args.feature_aware_baseline:
             raise ValueError("--feature-aware-baseline is required with --include-feature-aware")
         steps.append(
@@ -154,10 +256,10 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
             )
         )
 
-    if args.include_gradcam:
+    if "gradcam" in stages:
         steps.append(Step("gradcam", [py, script("gradcam_grid_by_class.py")], [Path("gradcam_grid_by_class.py")]))
 
-    if args.include_diploma_figures:
+    if "diploma-figures" in stages:
         steps.append(
             Step(
                 "diploma_figures",
@@ -176,6 +278,23 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
                 [summary, Path("fix_diploma_figures_v2.py"), Path(args.diploma_model_path)],
             )
         )
+
+    if "package" in stages:
+        package_cmd = [
+            py,
+            script("package_experiment_archive.py"),
+            "--science-dir",
+            args.science_dir,
+        ]
+        if args.output_archive:
+            package_cmd.extend(["--output", args.output_archive])
+        if args.include_diploma_figures:
+            package_cmd.append("--include-diploma-figures")
+        if args.include_embedding_plots:
+            package_cmd.append("--include-embedding-plots")
+        if args.include_checkpoints:
+            package_cmd.append("--include-checkpoints")
+        steps.append(Step("package", package_cmd, [science_dir, Path("package_experiment_archive.py")]))
 
     return steps
 

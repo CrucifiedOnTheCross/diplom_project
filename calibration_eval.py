@@ -104,6 +104,7 @@ def is_checkpoint_stable(model_path: Path, min_age_sec: int) -> Tuple[bool, str]
 def get_experiment_status(
     exp_dir: Path,
     force: bool,
+    only_missing: bool,
     checkpoint_min_age_sec: int,
 ) -> Tuple[str, str]:
     """
@@ -112,12 +113,24 @@ def get_experiment_status(
     model_path = exp_dir / 'best_model.pth'
     report_json_path = exp_dir / 'calibration_report.json'
     bins_csv_path = exp_dir / 'calibration_bins.csv'
-
-    if report_json_path.exists() and bins_csv_path.exists() and not force:
-        return 'skip', 'calibration already exists'
+    valid_logits_path = exp_dir / 'valid_logits.npz'
+    test_logits_path = exp_dir / 'test_logits.npz'
 
     if not model_path.exists():
         return 'skip', 'best_model.pth not found'
+    if not valid_logits_path.exists() or not test_logits_path.exists():
+        return 'skip', 'prediction cache missing; run collect_predictions.py first'
+
+    if report_json_path.exists() and bins_csv_path.exists() and not force:
+        newest_dependency = max(
+            model_path.stat().st_mtime,
+            valid_logits_path.stat().st_mtime,
+            test_logits_path.stat().st_mtime,
+        )
+        outputs_current = report_json_path.stat().st_mtime >= newest_dependency and bins_csv_path.stat().st_mtime >= newest_dependency
+        if outputs_current:
+            return 'skip', 'calibration report is up to date'
+        return 'process', 'calibration report is outdated'
 
     if not has_final_markers(exp_dir):
         return 'skip', 'experiment looks active: final artifacts are missing'
@@ -335,6 +348,8 @@ def evaluate_experiment(
     config_path = exp_dir / 'config.txt'
     report_json_path = exp_dir / 'calibration_report.json'
     bins_csv_path = exp_dir / 'calibration_bins.csv'
+    valid_logits_path = exp_dir / 'valid_logits.npz'
+    test_logits_path = exp_dir / 'test_logits.npz'
 
     cfg = parse_config(config_path)
     data_dir = cfg.get('data_dir', 'dataset')
@@ -342,6 +357,8 @@ def evaluate_experiment(
 
     if not valid_dir.exists() or not test_dir.exists():
         raise FileNotFoundError(f'valid/test dirs not found ({valid_dir}, {test_dir})')
+    if not valid_logits_path.exists() or not test_logits_path.exists():
+        raise FileNotFoundError('valid_logits.npz/test_logits.npz missing; run collect_predictions.py first')
 
     print(f'\n[START] {exp_dir.name}')
     print(f'[*] data_dir from config: {data_dir}')
@@ -349,18 +366,14 @@ def evaluate_experiment(
     print(f'[*] valid: {valid_dir}')
     print(f'[*] test : {test_dir}')
 
-    valid_dataset, valid_loader = build_loader(valid_dir, batch_size=batch_size)
-    test_dataset, test_loader = build_loader(test_dir, batch_size=batch_size)
-
-    if valid_dataset.classes != CLASS_NAMES:
-        print(f'[WARN] {exp_dir.name}: unexpected valid class order: {valid_dataset.classes}')
-    if test_dataset.classes != CLASS_NAMES:
-        print(f'[WARN] {exp_dir.name}: unexpected test class order: {test_dataset.classes}')
-
-    model = load_model(model_path, device=device)
-
-    val_logits, val_labels = collect_logits_and_labels(model, valid_loader, device)
-    test_logits, test_labels = collect_logits_and_labels(model, test_loader, device)
+    with np.load(valid_logits_path, allow_pickle=True) as valid_cache:
+        val_logits = valid_cache['logits'].astype(np.float32)
+        val_labels = valid_cache['y_true'].astype(np.int64)
+        num_valid = len(val_labels)
+    with np.load(test_logits_path, allow_pickle=True) as test_cache:
+        test_logits = test_cache['logits'].astype(np.float32)
+        test_labels = test_cache['y_true'].astype(np.int64)
+        num_test = len(test_labels)
 
     pre_metrics, pre_bins = evaluate_probabilities(
         test_logits, test_labels, num_classes=len(CLASS_NAMES), n_bins=n_bins
@@ -379,8 +392,8 @@ def evaluate_experiment(
         'eval_policy': eval_policy,
         'valid_dir': str(valid_dir),
         'test_dir': str(test_dir),
-        'num_valid': int(len(valid_dataset)),
-        'num_test': int(len(test_dataset)),
+        'num_valid': int(num_valid),
+        'num_test': int(num_test),
         'temperature': float(temperature),
         'ece_before': float(pre_metrics['ECE']),
         'brier_before': float(pre_metrics['Brier']),
@@ -473,9 +486,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--experiments_root', type=str, default='science_folder')
     parser.add_argument('--batch_size', type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument('--num_workers', type=int, default=8, help='Accepted for pipeline compatibility; logits are read from cache')
     parser.add_argument('--bins', type=int, default=15)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--force', action='store_true', help='Recompute even if calibration files already exist')
+    parser.add_argument(
+        '--only-missing',
+        action='store_true',
+        help='Compute only missing or outdated calibration files. This is the default when --force is not used.',
+    )
     parser.add_argument(
         '--checkpoint_min_age_sec',
         type=int,
@@ -513,6 +532,7 @@ def main() -> None:
         status, reason = get_experiment_status(
             exp_dir=exp_dir,
             force=args.force,
+            only_missing=args.only_missing,
             checkpoint_min_age_sec=args.checkpoint_min_age_sec,
         )
 

@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import pandas as pd
 
@@ -25,10 +26,29 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run predefined statistical significance comparisons.")
     parser.add_argument("--science-dir", default="science_folder")
     parser.add_argument("--out-dir", default="science_folder/statistical_significance")
-    parser.add_argument("--n-bootstrap", type=int, default=10000)
-    parser.add_argument("--n-permutations", type=int, default=10000)
+    parser.add_argument("--n-bootstrap", type=int, default=2000)
+    parser.add_argument("--n-permutations", type=int, default=2000)
+    parser.add_argument("--fast", action="store_true", help="Use 2000 bootstrap and 2000 permutation iterations")
+    parser.add_argument("--final", action="store_true", help="Use 10000 bootstrap and 10000 permutation iterations")
+    parser.add_argument("--force", action="store_true", help="Recompute pairwise CSV files even when they are up to date")
+    parser.add_argument(
+        "--only-missing",
+        action="store_true",
+        help="Compute only missing or outdated pairwise CSV files. This is the default when --force is not used.",
+    )
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of pairwise comparisons to run in parallel")
     parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.fast and args.final:
+        parser.error("--fast and --final are mutually exclusive")
+    if args.fast:
+        args.n_bootstrap = 2000
+        args.n_permutations = 2000
+    if args.final:
+        args.n_bootstrap = 10000
+        args.n_permutations = 10000
+        args.force = True
+    return args
 
 
 def prediction_file(science_dir: Path, experiment: str) -> Path | None:
@@ -42,6 +62,55 @@ def prediction_file(science_dir: Path, experiment: str) -> Path | None:
 
 def safe_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
+
+
+def output_is_current(out_csv: Path, dependencies: List[Path]) -> bool:
+    if not out_csv.exists() or not dependencies or not all(path.exists() for path in dependencies):
+        return False
+    newest_dependency = max(path.stat().st_mtime for path in dependencies)
+    return out_csv.stat().st_mtime >= newest_dependency
+
+
+def compare_pair(task: dict) -> dict:
+    name_a = task["name_a"]
+    name_b = task["name_b"]
+    pred_a = Path(task["pred_a"])
+    pred_b = Path(task["pred_b"])
+    out_csv = Path(task["out_csv"])
+
+    if output_is_current(out_csv, [pred_a, pred_b]) and not task["force"]:
+        return {"status": "ok", "out_csv": str(out_csv), "model_a": name_a, "model_b": name_b, "detail": "up to date"}
+
+    cmd = [
+        sys.executable,
+        "compare_model_significance.py",
+        "--a",
+        str(pred_a),
+        "--b",
+        str(pred_b),
+        "--name-a",
+        name_a,
+        "--name-b",
+        name_b,
+        "--out",
+        str(out_csv),
+        "--n-bootstrap",
+        str(task["n_bootstrap"]),
+        "--n-permutations",
+        str(task["n_permutations"]),
+        "--seed",
+        str(task["seed"]),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return {
+            "status": "skipped",
+            "model_a": name_a,
+            "model_b": name_b,
+            "reason": "comparison failed",
+            "detail": (result.stderr or result.stdout).strip(),
+        }
+    return {"status": "ok", "out_csv": str(out_csv), "model_a": name_a, "model_b": name_b, "detail": "computed"}
 
 
 def write_markdown(results: pd.DataFrame, skipped: pd.DataFrame, out_path: Path) -> None:
@@ -100,11 +169,11 @@ def main() -> None:
 
     result_frames = []
     skipped_rows = []
+    tasks = []
 
     for idx, (name_a, name_b) in enumerate(PAIRS, start=1):
         pred_a = prediction_file(science_dir, name_a)
         pred_b = prediction_file(science_dir, name_b)
-        pair_label = f"{name_a}__vs__{name_b}"
 
         if pred_a is None or pred_b is None:
             skipped_rows.append({
@@ -116,39 +185,39 @@ def main() -> None:
             continue
 
         out_csv = out_dir / f"significance_{idx:02d}_{safe_name(name_a)}_vs_{safe_name(name_b)}.csv"
-        cmd = [
-            sys.executable,
-            "compare_model_significance.py",
-            "--a",
-            str(pred_a),
-            "--b",
-            str(pred_b),
-            "--name-a",
-            name_a,
-            "--name-b",
-            name_b,
-            "--out",
-            str(out_csv),
-            "--n-bootstrap",
-            str(args.n_bootstrap),
-            "--n-permutations",
-            str(args.n_permutations),
-            "--seed",
-            str(args.seed),
-        ]
-        print("[RUN]", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            skipped_rows.append({
-                "model_a": name_a,
-                "model_b": name_b,
-                "reason": "comparison failed",
-                "detail": (result.stderr or result.stdout).strip(),
-            })
-            continue
+        tasks.append({
+            "name_a": name_a,
+            "name_b": name_b,
+            "pred_a": str(pred_a),
+            "pred_b": str(pred_b),
+            "out_csv": str(out_csv),
+            "n_bootstrap": args.n_bootstrap,
+            "n_permutations": args.n_permutations,
+            "seed": args.seed,
+            "force": args.force,
+        })
 
-        df = pd.read_csv(out_csv)
-        result_frames.append(df)
+    if tasks:
+        workers = max(1, min(args.num_workers, len(tasks)))
+        print(
+            f"[INFO] Running significance with n_bootstrap={args.n_bootstrap}, "
+            f"n_permutations={args.n_permutations}, workers={workers}"
+        )
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(compare_pair, task) for task in tasks]
+            for future in as_completed(futures):
+                result = future.result()
+                if result["status"] == "ok":
+                    print(f"[{result['detail'].upper()}] {result['model_a']} vs {result['model_b']}")
+                    result_frames.append(pd.read_csv(result["out_csv"]))
+                else:
+                    print(f"[SKIP] {result['model_a']} vs {result['model_b']}: {result['reason']}")
+                    skipped_rows.append({
+                        "model_a": result["model_a"],
+                        "model_b": result["model_b"],
+                        "reason": result["reason"],
+                        "detail": result["detail"],
+                    })
 
     combined = pd.concat(result_frames, ignore_index=True) if result_frames else pd.DataFrame()
     skipped = pd.DataFrame(skipped_rows, columns=["model_a", "model_b", "reason", "detail"])

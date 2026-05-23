@@ -43,8 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name-a", required=True)
     parser.add_argument("--name-b", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--n-bootstrap", type=int, default=10000)
-    parser.add_argument("--n-permutations", type=int, default=10000)
+    parser.add_argument("--n-bootstrap", type=int, default=2000)
+    parser.add_argument("--n-permutations", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
