@@ -137,6 +137,31 @@ def collect_predictions(model, loader, device_obj: torch.device):
     return np.array(y_true), np.array(y_pred), np.array(y_probs)
 
 
+def write_predictions_csv(exp_dir: Path, dataset: datasets.ImageFolder, y_true: np.ndarray, y_pred: np.ndarray, y_probs: np.ndarray) -> Path:
+    out_path = exp_dir / "test_predictions.csv"
+    fieldnames = [
+        "image_path",
+        "true_label",
+        "predicted_label",
+        "confidence",
+        *[f"prob_{cls}" for cls in CLASS_NAMES],
+    ]
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for idx, (image_path, _) in enumerate(dataset.samples):
+            row = {
+                "image_path": image_path,
+                "true_label": CLASS_NAMES[int(y_true[idx])],
+                "predicted_label": CLASS_NAMES[int(y_pred[idx])],
+                "confidence": float(np.max(y_probs[idx])),
+            }
+            for cls_idx, cls in enumerate(CLASS_NAMES):
+                row[f"prob_{cls}"] = float(y_probs[idx, cls_idx])
+            writer.writerow(row)
+    return out_path
+
+
 def write_summary(rows: List[dict], out_csv: Path) -> None:
     if not rows:
         return
@@ -189,6 +214,7 @@ def main() -> None:
             y_true, y_pred, y_probs = collect_predictions(model, loader, device_obj)
             metrics = calculate_advanced_metrics(y_true, y_pred, y_probs)
             save_medical_report(exp_dir, y_true, y_pred, y_probs, metrics, filename="medical_metrics_report_test.txt")
+            predictions_path = write_predictions_csv(exp_dir, dataset, y_true, y_pred, y_probs)
             rows.append({
                 "experiment": exp_name,
                 "status": "ok",
@@ -197,7 +223,7 @@ def main() -> None:
                 "test_dir": str(test_dir),
                 "num_test": len(dataset),
                 "report_path": str(out_report),
-                "detail": "",
+                "detail": f"predictions={predictions_path}",
             })
             print(f"[DONE] {exp_name}: {out_report}")
         except Exception as exc:

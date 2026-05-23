@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--strict", action="store_true", help="Stop on the first failed optional step")
     parser.add_argument("--force", action="store_true", help="Forward --force to calibration/threshold scripts")
+    parser.add_argument("--run-significance", action="store_true", help="Run predefined pairwise significance analysis")
 
     parser.add_argument("--include-feature-aware", action="store_true")
     parser.add_argument("--feature-aware-baseline", default="")
@@ -108,7 +109,7 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
         "--batch_size",
         str(args.batch_size),
     ]
-    if args.force:
+    if args.force or args.run_significance:
         test_report_cmd.append("--force")
 
     steps = [
@@ -118,6 +119,15 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
         Step("test_medical_reports", test_report_cmd, [science_dir, Path("evaluate_test_reports.py")]),
         Step("experiment_summary", [py, script("update_experiment_summary.py")], [science_dir, Path("update_experiment_summary.py")]),
     ]
+
+    if args.run_significance:
+        steps.append(
+            Step(
+                "significance_analysis",
+                [py, script("run_significance_analysis.py"), "--science-dir", args.science_dir],
+                [science_dir, Path("run_significance_analysis.py"), Path("compare_model_significance.py")],
+            )
+        )
 
     for plot_script in existing_scripts(["plot_pareto.py", "plot_clinical_pareto.py", "plot_threshold_shift.py"]):
         steps.append(Step(plot_script.stem, [py, str(plot_script)], [summary, plot_script]))
