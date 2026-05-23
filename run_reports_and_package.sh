@@ -83,6 +83,13 @@ echo "============================================================"
 echo "OUTPUT_ARCHIVE=$OUTPUT_ARCHIVE"
 echo
 
+if [[ -e "$OUTPUT_ARCHIVE" ]]; then
+  BACKUP_ARCHIVE="${OUTPUT_ARCHIVE}.bak.${STAMP}"
+  echo "[WARN] Output archive already exists: $OUTPUT_ARCHIVE"
+  echo "[WARN] Moving old archive to: $BACKUP_ARCHIVE"
+  mv "$OUTPUT_ARCHIVE" "$BACKUP_ARCHIVE"
+fi
+
 PACKAGE_CMD=(
   python package_experiment_archive.py
   --output "$OUTPUT_ARCHIVE"
