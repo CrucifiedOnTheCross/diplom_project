@@ -21,8 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--real-train-metadata", required=True)
     parser.add_argument("--synthetic-embeddings", required=True)
     parser.add_argument("--synthetic-metadata", required=True)
-    parser.add_argument("--selection-mode", required=True, choices=["random", "core", "diverse_core"])
+    parser.add_argument("--selection-mode", required=True, choices=["random", "core", "diverse_core", "confident_core"])
     parser.add_argument("--synthetic-ratio", type=float, required=True)
+    parser.add_argument("--require-correct-pred", action="store_true")
+    parser.add_argument("--min-confidence", type=float, default=0.0)
+    parser.add_argument("--max-own-quantile", type=float, default=0.75)
+    parser.add_argument("--min-margin", type=float, default=-float("inf"))
     parser.add_argument("--output", required=True)
     parser.add_argument("--random-state", type=int, default=42)
     return parser.parse_args()
@@ -51,7 +55,7 @@ def compute_real_geometry(embeddings: np.ndarray, meta: pd.DataFrame):
         centroid = cls_emb.mean(axis=0)
         distances = np.linalg.norm(cls_emb - centroid, axis=1)
         centroids[cls] = centroid
-        radii[cls] = float(np.quantile(distances, 0.75))
+        radii[cls] = distances
         real_counts[cls] = int(mask.sum())
 
     return centroids, radii, real_counts
@@ -124,9 +128,13 @@ def select_rows(
     ratio: float,
     synthetic_embeddings: np.ndarray,
     synthetic_annotated: pd.DataFrame,
-    radii: Dict[str, float],
+    radii: Dict[str, np.ndarray],
     real_counts: Dict[str, int],
     seed: int,
+    require_correct_pred: bool,
+    min_confidence: float,
+    max_own_quantile: float,
+    min_margin: float,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     selected_indices: List[int] = []
@@ -149,13 +157,31 @@ def select_rows(
         else:
             own = synthetic_annotated["distance_to_own_centroid"].to_numpy()
             nearest = synthetic_annotated["nearest_centroid_class"].to_numpy()
-            core_mask = cls_mask & (own <= radii.get(cls, np.inf)) & (nearest == cls)
+            radius = float(np.quantile(radii[cls], max_own_quantile)) if cls in radii else np.inf
+            core_mask = cls_mask & (own <= radius) & (nearest == cls)
+
+            if mode == "confident_core":
+                if require_correct_pred:
+                    if "predicted_label" not in synthetic_annotated.columns:
+                        raise ValueError("--require-correct-pred needs predicted_label in synthetic metadata")
+                    pred = synthetic_annotated["predicted_label"].astype(str).to_numpy()
+                    core_mask = core_mask & (pred == cls)
+
+                if min_confidence > 0:
+                    if "confidence" not in synthetic_annotated.columns:
+                        raise ValueError("--min-confidence needs confidence in synthetic metadata")
+                    conf = pd.to_numeric(synthetic_annotated["confidence"], errors="coerce").fillna(-np.inf).to_numpy()
+                    core_mask = core_mask & (conf >= min_confidence)
+
+                margin = synthetic_annotated["margin_to_nearest_other"].to_numpy()
+                core_mask = core_mask & (margin > min_margin)
+
             pool = np.flatnonzero(core_mask)
             if len(pool) == 0:
-                print(f"[WARN] No core candidates for {cls}; falling back to all class candidates")
-                pool = cls_indices
+                print(f"[WARN] No {mode} candidates for {cls}")
+                continue
 
-        if mode == "diverse_core":
+        if mode in {"diverse_core", "confident_core"}:
             chosen = farthest_point_select(synthetic_embeddings, pool, target, seed + CLASS_NAMES.index(cls))
         else:
             chosen = rng.choice(pool, size=min(target, len(pool)), replace=False)
@@ -192,6 +218,10 @@ def main() -> None:
         radii=radii,
         real_counts=real_counts,
         seed=args.random_state,
+        require_correct_pred=args.require_correct_pred,
+        min_confidence=args.min_confidence,
+        max_own_quantile=args.max_own_quantile,
+        min_margin=args.min_margin,
     )
 
     fieldnames = [
@@ -200,6 +230,8 @@ def main() -> None:
         "source",
         "selection_mode",
         "synthetic_ratio",
+        "predicted_label",
+        "confidence",
         "distance_to_own_centroid",
         "nearest_centroid_class",
         "nearest_centroid_distance",
