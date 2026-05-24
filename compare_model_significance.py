@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -55,17 +55,29 @@ def read_predictions(path: Path) -> pd.DataFrame:
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"{path} is missing columns: {sorted(missing)}")
-    df = df.sort_values("image_path").reset_index(drop=True)
+    if "image_key" not in df.columns:
+        df["image_key"] = df["image_path"].map(make_image_key)
+    df = df.sort_values("image_key").reset_index(drop=True)
     return df
+
+
+def make_image_key(path_value: str) -> str:
+    path = Path(str(path_value))
+    return f"{path.parent.name}/{path.name}"
 
 
 def validate_pair(a: pd.DataFrame, b: pd.DataFrame) -> None:
     if len(a) != len(b):
         raise ValueError(f"Different row counts: {len(a)} vs {len(b)}")
-    if not a["image_path"].equals(b["image_path"]):
-        raise ValueError("image_path columns do not match after sorting")
+    if not a["image_key"].equals(b["image_key"]):
+        missing_in_b = sorted(set(a["image_key"]) - set(b["image_key"]))[:5]
+        missing_in_a = sorted(set(b["image_key"]) - set(a["image_key"]))[:5]
+        raise ValueError(
+            "image_key columns do not match after sorting; "
+            f"missing_in_b={missing_in_b}, missing_in_a={missing_in_a}"
+        )
     if not a["true_label"].equals(b["true_label"]):
-        raise ValueError("true_label columns do not match after sorting")
+        raise ValueError("true_label columns do not match after sorting by image_key")
 
 
 def labels_to_int(labels: pd.Series) -> np.ndarray:
