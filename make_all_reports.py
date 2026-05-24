@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--include-feature-aware", action="store_true")
     parser.add_argument("--feature-aware-baseline", default="")
+    parser.add_argument("--feature-aware-additional-baselines", nargs="*", default=["baseline_real_only_raw_ganmix"])
     parser.add_argument(
         "--feature-aware-experiments",
         nargs="*",
@@ -247,6 +248,8 @@ def build_steps(args: argparse.Namespace) -> List[Step]:
                     args.summary,
                     "--baseline",
                     args.feature_aware_baseline,
+                    "--additional-baselines",
+                    *args.feature_aware_additional_baselines,
                     "--experiments",
                     *args.feature_aware_experiments,
                     "--output-dir",

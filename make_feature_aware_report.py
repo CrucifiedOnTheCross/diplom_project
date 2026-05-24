@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build feature-aware GAN-mix comparison report.")
     parser.add_argument("--summary", default="all_experiments_summary.csv")
     parser.add_argument("--baseline", required=True, help="Baseline Experiment_Folder")
+    parser.add_argument("--additional-baselines", nargs="*", default=[], help="Extra baseline rows to include in the comparison table")
     parser.add_argument("--experiments", nargs="+", required=True, help="Experiment_Folder values to compare")
     parser.add_argument("--output-dir", default="feature_aware_report")
     return parser.parse_args()
@@ -39,8 +40,11 @@ def numeric(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
     return out
 
 
-def make_comparison(df: pd.DataFrame, baseline: str, experiments: List[str]) -> pd.DataFrame:
-    wanted = [baseline] + [name for name in experiments if name != baseline]
+def make_comparison(df: pd.DataFrame, baseline: str, additional_baselines: List[str], experiments: List[str]) -> pd.DataFrame:
+    wanted = []
+    for name in [baseline, *additional_baselines, *experiments]:
+        if name not in wanted:
+            wanted.append(name)
     subset = df[df["Experiment_Folder"].isin(wanted)].copy()
     subset["_order"] = subset["Experiment_Folder"].map({name: i for i, name in enumerate(wanted)})
     subset = subset.sort_values("_order").drop(columns=["_order"])
@@ -122,11 +126,20 @@ def main() -> None:
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     summary = read_summary(Path(args.summary))
-    comparison = make_comparison(summary, args.baseline, args.experiments)
+    comparison = make_comparison(summary, args.baseline, args.additional_baselines, args.experiments)
     delta = make_delta(comparison, args.baseline)
 
     comparison.to_csv(output_dir / "feature_aware_summary.csv", index=False, encoding="utf-8-sig")
     delta.to_csv(output_dir / "feature_aware_delta_summary.csv", index=False, encoding="utf-8-sig")
+    for extra_baseline in args.additional_baselines:
+        try:
+            make_delta(comparison, extra_baseline).to_csv(
+                output_dir / f"feature_aware_delta_vs_{extra_baseline}.csv",
+                index=False,
+                encoding="utf-8-sig",
+            )
+        except ValueError:
+            print(f"[WARN] Additional baseline not found in summary: {extra_baseline}")
 
     plot_metric(comparison, "Balanced_Accuracy", fig_dir / "balanced_accuracy_by_experiment.png", "Balanced Accuracy by experiment", "Balanced Accuracy")
     plot_metric(comparison, "MCC", fig_dir / "mcc_by_experiment.png", "MCC by experiment", "MCC")

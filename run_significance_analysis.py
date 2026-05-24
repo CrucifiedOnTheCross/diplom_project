@@ -19,6 +19,11 @@ PAIRS = [
     ("gan_bcc50_akiec50_vasc25_raw_ganmix", "gan_bcc50_akiec50_vasc25_raw_ganmix_focal_weighted"),
     ("random_ganmix_25_raw_ce", "random_ganmix_25_focal_weighted"),
     ("ablation_raw_focal_g1_weighted", "ensemble_real_supcon_ganmix"),
+    ("baseline_real_only_raw_ganmix", "random_ganmix_25_raw_ce"),
+    ("baseline_real_only_raw_ganmix", "diverse_core_ganmix_25_raw_ce"),
+    ("random_ganmix_25_raw_ce", "diverse_core_ganmix_25_raw_ce"),
+    ("diverse_core_ganmix_25_raw_ce", "diverse_core_ganmix_25_weighted_ce"),
+    ("confident_core_ganmix_15_raw_ce", "confident_core_ganmix_15_focal_weighted"),
 ]
 
 

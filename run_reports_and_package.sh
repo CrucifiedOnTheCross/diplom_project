@@ -22,6 +22,7 @@ ONLY_MISSING="${ONLY_MISSING:-1}"
 
 INCLUDE_FEATURE_AWARE="${INCLUDE_FEATURE_AWARE:-1}"
 FEATURE_BASELINE="${FEATURE_BASELINE:-01_base_raw}"
+FEATURE_ADDITIONAL_BASELINES="${FEATURE_ADDITIONAL_BASELINES:-baseline_real_only_raw_ganmix}"
 FEATURE_EXPERIMENTS="${FEATURE_EXPERIMENTS:-random_ganmix_25_raw_ce diverse_core_ganmix_25_raw_ce diverse_core_ganmix_25_weighted_ce}"
 
 INCLUDE_GRADCAM="${INCLUDE_GRADCAM:-0}"
@@ -69,6 +70,12 @@ if [[ "$INCLUDE_FEATURE_AWARE" == "1" ]]; then
   REPORT_CMD+=(
     --include-feature-aware
     --feature-aware-baseline "$FEATURE_BASELINE"
+    --feature-aware-additional-baselines
+  )
+  # shellcheck disable=SC2206
+  FEATURE_BASELINE_ARRAY=($FEATURE_ADDITIONAL_BASELINES)
+  REPORT_CMD+=("${FEATURE_BASELINE_ARRAY[@]}")
+  REPORT_CMD+=(
     --feature-aware-experiments
   )
   # shellcheck disable=SC2206
