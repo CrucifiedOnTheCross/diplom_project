@@ -14,6 +14,8 @@ import pandas as pd
 
 
 PAIRS = [
+    ("ablation_raw_ce", "ablation_raw_focal_g1_weighted"),
+    ("01_base_raw", "ablation_raw_focal_g1_weighted"),
     ("ablation_raw_focal_g1_weighted", "24_raw_supcon_weighted"),
     ("ablation_raw_focal_g1_weighted", "gan_bcc50_akiec50_vasc25_raw_ganmix_focal_weighted"),
     ("gan_bcc50_akiec50_vasc25_raw_ganmix", "gan_bcc50_akiec50_vasc25_raw_ganmix_focal_weighted"),
@@ -24,6 +26,10 @@ PAIRS = [
     ("random_ganmix_25_raw_ce", "diverse_core_ganmix_25_raw_ce"),
     ("diverse_core_ganmix_25_raw_ce", "diverse_core_ganmix_25_weighted_ce"),
     ("confident_core_ganmix_15_raw_ce", "confident_core_ganmix_15_focal_weighted"),
+    ("confident_core_ganmix_15_focal_weighted", "confident_core_ganmix_15_supcon_weighted"),
+    ("24_raw_supcon_weighted", "confident_core_ganmix_15_supcon_weighted"),
+    ("diverse_core_ganmix_25_weighted_ce", "diverse_core_ganmix_25_supcon_weighted"),
+    ("24_raw_supcon_weighted", "diverse_core_ganmix_25_supcon_weighted"),
 ]
 
 
